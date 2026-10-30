@@ -61,6 +61,7 @@ app.use('/api/pickup-requests', require('./routes/pickupRequests'));
 app.use('/api/categories', require('./routes/categories'));
 app.use('/api/collectors', require('./routes/collectors'));
 app.use('/api/qr', require('./routes/qrVerification'));
+app.use('/api/recycling-records', require('./routes/recyclingRecords'));
 app.use('/api/rewards', require('./routes/rewards'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/admin', require('./routes/admin'));

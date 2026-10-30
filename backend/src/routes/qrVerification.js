@@ -115,19 +115,7 @@ router.post(
         statusHistory: admin.firestore.FieldValue.arrayUnion(historyEntry),
       });
 
-      // 7. Create permanent recycling record for analytics
-      await db.collection('recyclingRecords').add({
-        requestId,
-        citizenUid: citizenId,
-        collectorUid: req.user.uid,
-        collectorName: req.user.displayName || 'Authorized Collector',
-        categoryId: reqData.categoryId,
-        categoryName: reqData.categoryName,
-        quantityKg: finalWeight,
-        verifiedAt: now,
-      });
-
-      // 8. Award reward points
+      // 7. Award reward points
       const { points, alreadyAwarded, newBalance } = await awardRewardPoints({
         citizenUid: citizenId,
         requestId,
@@ -136,9 +124,23 @@ router.post(
         actualWeightKg: finalWeight,
       });
 
-      // 9. Notify citizen in real time
+      // 8. Look up the citizen once, for the recycling record and the notification below.
       const citizenDoc = await db.collection('users').doc(citizenId).get();
       const citizenData = citizenDoc.exists ? citizenDoc.data() : {};
+
+      // 9. Create permanent recycling record for analytics (citizen history, admin reports)
+      await db.collection('recyclingRecords').add({
+        requestId,
+        citizenUid: citizenId,
+        citizenName: citizenData.displayName || reqData.citizenName || 'Citizen',
+        collectorUid: req.user.uid,
+        collectorName: req.user.displayName || 'Authorized Collector',
+        categoryId: reqData.categoryId,
+        categoryName: reqData.categoryName,
+        quantityKg: finalWeight,
+        points,
+        verifiedAt: now,
+      });
       sendNotification({
         toUid: citizenId,
         title: '🎉 Recycling Verified & Points Awarded!',

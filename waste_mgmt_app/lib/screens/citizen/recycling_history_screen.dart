@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import '../../core/api_client.dart';
 import '../../core/theme.dart';
 import '../../widgets/common_widgets.dart';
@@ -16,6 +15,7 @@ class _RecyclingHistoryScreenState extends State<RecyclingHistoryScreen> {
   bool _loading = true;
   String? _error;
   double _totalKg = 0;
+  int _totalPoints = 0;
 
   @override
   void initState() {
@@ -26,14 +26,20 @@ class _RecyclingHistoryScreenState extends State<RecyclingHistoryScreen> {
   Future<void> _load() async {
     setState(() { _loading = true; _error = null; });
     try {
-      // Fetch verified requests or recycling records
-      final data = await ApiClient.get('/pickup-requests?status=Verified');
-      _records = List<Map<String, dynamic>>.from(data['requests'] ?? []);
+      final data = await ApiClient.get('/recycling-records');
+      _records = List<Map<String, dynamic>>.from(data['records'] ?? []);
       _totalKg = _records.fold(0.0, (sum, r) => sum + ((r['quantityKg'] as num?)?.toDouble() ?? 0.0));
+      _totalPoints = _records.fold(0, (sum, r) => sum + ((r['points'] as num?)?.toInt() ?? 0));
     } catch (e) {
       _error = 'Failed to load recycling history.';
     }
     if (mounted) setState(() => _loading = false);
+  }
+
+  String _formatDate(dynamic date) {
+    if (date == null) return '';
+    final str = date.toString();
+    return str.length >= 10 ? str.substring(0, 10) : str;
   }
 
   @override
@@ -59,11 +65,20 @@ class _RecyclingHistoryScreenState extends State<RecyclingHistoryScreen> {
                       child: Icon(Icons.eco, color: Colors.white, size: 32),
                     ),
                     const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Total Recycled', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                          Text('${_totalKg.toStringAsFixed(1)} kg', style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    ),
                     Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        const Text('Total Recycled', style: TextStyle(color: Colors.white70, fontSize: 13)),
-                        Text('${_totalKg.toStringAsFixed(1)} kg', style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold)),
+                        const Text('Points Earned', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                        Text('$_totalPoints', style: const TextStyle(color: Color(0xFFFFD700), fontSize: 20, fontWeight: FontWeight.bold)),
                       ],
                     ),
                   ],
@@ -74,7 +89,7 @@ class _RecyclingHistoryScreenState extends State<RecyclingHistoryScreen> {
                   ? const EmptyStateWidget(
                       icon: Icons.history,
                       title: 'No recycling records yet',
-                      subtitle: 'Complete verified pickup requests to build your recycling history.',
+                      subtitle: 'Once a collector verifies a pickup, it shows up here.',
                     )
                   : RefreshIndicator(
                       onRefresh: _load,
@@ -83,6 +98,7 @@ class _RecyclingHistoryScreenState extends State<RecyclingHistoryScreen> {
                         itemCount: _records.length,
                         itemBuilder: (_, i) {
                           final r = _records[i];
+                          final points = (r['points'] as num?)?.toInt();
                           return Card(
                             child: ListTile(
                               leading: const CircleAvatar(
@@ -90,13 +106,18 @@ class _RecyclingHistoryScreenState extends State<RecyclingHistoryScreen> {
                                 child: Icon(Icons.recycling, color: AppTheme.primary),
                               ),
                               title: Text(r['categoryName'] ?? 'Recycling', style: const TextStyle(fontWeight: FontWeight.bold)),
-                              subtitle: Text(r['address'] ?? '', maxLines: 1, overflow: TextOverflow.ellipsis),
+                              subtitle: Text(
+                                'Collected by ${r['collectorName'] ?? 'a collector'} • ${_formatDate(r['verifiedAt'])}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              isThreeLine: false,
                               trailing: Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 crossAxisAlignment: CrossAxisAlignment.end,
                                 children: [
                                   Text('${r['quantityKg']} kg', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppTheme.primary)),
-                                  const Text('Verified', style: TextStyle(fontSize: 11, color: AppTheme.success)),
+                                  Text(points != null ? '+$points pts' : 'Verified', style: const TextStyle(fontSize: 11, color: AppTheme.success)),
                                 ],
                               ),
                             ),
