@@ -3,9 +3,105 @@ const { body, validationResult } = require('express-validator');
 const { getDb, admin } = require('../config/firebase');
 const { authenticate } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { createUserAccount, publicUser } = require('../services/authService');
 
 const router = express.Router();
 router.use(authenticate, requireRole('admin'));
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+/**
+ * GET /api/admin/users
+ * All user accounts (citizens, collectors, admins).
+ */
+router.get('/users', async (req, res) => {
+  try {
+    const db = getDb();
+    const snap = await db.collection('users').get();
+    const users = snap.docs
+      .map((d) => publicUser({ id: d.id, ...d.data() }))
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    res.json({ users });
+  } catch (err) {
+    console.error('[Admin] Users list error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+/**
+ * POST /api/admin/users
+ * Admin manually creates an account with any role (citizen, collector, admin).
+ * Body: { displayName, email, phone, password, role }
+ */
+router.post(
+  '/users',
+  [
+    body('displayName').trim().notEmpty().withMessage('Name is required'),
+    body('email').trim().isEmail().withMessage('A valid email is required'),
+    body('phone')
+      .trim()
+      .notEmpty().withMessage('Phone number is required')
+      .custom((v) => /^\d{10,13}$/.test(v.replace(/\D/g, ''))).withMessage('Enter a valid 10-digit phone number'),
+    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+    body('role').isIn(['citizen', 'collector', 'admin']).withMessage('Role must be citizen, collector or admin'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(422).json({ error: errors.array()[0].msg, errors: errors.array() });
+
+    try {
+      const { displayName, email, phone, password, role } = req.body;
+      const userData = await createUserAccount({ displayName, email, phone, password, role });
+      res.status(201).json({ message: 'User account created', user: publicUser(userData) });
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      console.error('[Admin] Create user error:', err.message);
+      res.status(500).json({ error: 'Failed to create user' });
+    }
+  }
+);
+
+/**
+ * PATCH /api/admin/users/:uid
+ * Update role / active status for any account (citizens, collectors, admins).
+ */
+router.patch(
+  '/users/:uid',
+  [
+    body('role').optional().isIn(['citizen', 'collector', 'admin']),
+    body('active').optional().isBoolean(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+    const { uid } = req.params;
+    if (uid === req.user.uid && req.body.role && req.body.role !== 'admin') {
+      return res.status(400).json({ error: "You can't change your own role away from admin." });
+    }
+    if (uid === req.user.uid && req.body.active === false) {
+      return res.status(400).json({ error: "You can't deactivate your own account." });
+    }
+
+    const updates = {};
+    if (req.body.role !== undefined) updates.role = req.body.role;
+    if (req.body.active !== undefined) updates.active = req.body.active;
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+    updates.updatedAt = new Date().toISOString();
+
+    try {
+      const db = getDb();
+      const ref = db.collection('users').doc(uid);
+      const doc = await ref.get();
+      if (!doc.exists) return res.status(404).json({ error: 'User not found' });
+
+      await ref.update(updates);
+      res.json({ message: 'User updated', user: publicUser({ id: uid, ...doc.data(), ...updates }) });
+    } catch (err) {
+      console.error('[Admin] Update user error:', err.message);
+      res.status(500).json({ error: 'Failed to update user' });
+    }
+  }
+);
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
 /**

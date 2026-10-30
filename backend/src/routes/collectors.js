@@ -3,7 +3,7 @@ const { body, validationResult } = require('express-validator');
 const { getDb, admin } = require('../config/firebase');
 const { authenticate } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
-const { publicUser } = require('../services/authService');
+const { publicUser, createUserAccount } = require('../services/authService');
 
 const router = express.Router();
 router.use(authenticate, requireRole('admin'));
@@ -45,49 +45,33 @@ router.get('/:uid', async (req, res) => {
 
 /**
  * POST /api/collectors
- * Register a new collector account.
- * Expects: { uid, displayName, email, phone? }
- * The Firebase Auth account must already exist for the uid.
+ * Registers a brand-new collector account with a password, so they can log in
+ * immediately. Expects: { displayName, email, phone, password, vehicleType?, vehicleNumber? }
  */
 router.post(
   '/',
   [
-    body('uid').notEmpty().withMessage('uid is required'),
-    body('displayName').notEmpty().trim(),
-    body('email').isEmail().normalizeEmail(),
+    body('displayName').trim().notEmpty().withMessage('Name is required'),
+    body('email').trim().isEmail().withMessage('A valid email is required'),
+    body('phone')
+      .trim()
+      .notEmpty().withMessage('Phone number is required')
+      .custom((v) => /^\d{10,13}$/.test(v.replace(/\D/g, ''))).withMessage('Enter a valid 10-digit phone number'),
+    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
-
-    const { uid, displayName, email, phone = '' } = req.body;
+    if (!errors.isEmpty()) return res.status(422).json({ error: errors.array()[0].msg, errors: errors.array() });
 
     try {
-      const db = getDb();
-      const ref = db.collection('users').doc(uid);
-      const existing = await ref.get();
-
-      if (existing.exists) {
-        // Update role to collector
-        await ref.update({ role: 'collector', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-        return res.json({ message: 'User promoted to collector' });
-      }
-
-      await ref.set({
-        uid,
-        displayName,
-        email,
-        phone,
-        role: 'collector',
-        rewardBalance: 0,
-        active: true,
-        fcmToken: null,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      const { displayName, email, phone, password, vehicleType = '', vehicleNumber = '' } = req.body;
+      const userData = await createUserAccount({
+        displayName, email, phone, password, role: 'collector',
+        extra: { vehicleType, vehicleNumber },
       });
-
-      res.status(201).json({ message: 'Collector account created' });
+      res.status(201).json({ message: 'Collector account created', collector: publicUser(userData) });
     } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
       console.error('[Collectors] Create error:', err.message);
       res.status(500).json({ error: 'Failed to create collector' });
     }

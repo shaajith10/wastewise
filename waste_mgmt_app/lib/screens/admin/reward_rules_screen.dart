@@ -11,7 +11,8 @@ class RewardRulesScreen extends StatefulWidget {
 }
 
 class _RewardRulesScreenState extends State<RewardRulesScreen> {
-  Map<String, dynamic>? _rules;
+  List<Map<String, dynamic>> _rules = [];
+  List<Map<String, dynamic>> _categories = [];
   bool _loading = true;
   String? _error;
 
@@ -24,31 +25,50 @@ class _RewardRulesScreenState extends State<RewardRulesScreen> {
   Future<void> _load() async {
     setState(() { _loading = true; _error = null; });
     try {
-      final data = await ApiClient.get('/admin/reward-rules');
-      _rules = data['rules'] as Map<String, dynamic>?;
+      final rulesData = await ApiClient.get('/admin/reward-rules');
+      _rules = List<Map<String, dynamic>>.from(rulesData['rules'] ?? []);
+      final catData = await ApiClient.get('/admin/categories');
+      _categories = List<Map<String, dynamic>>.from(catData['categories'] ?? []);
     } catch (e) {
       _error = 'Failed to load reward rules.';
     }
     if (mounted) setState(() => _loading = false);
   }
 
-  Future<void> _showEditRuleDialog(String key, num currentVal) async {
-    final ctrl = TextEditingController(text: '$currentVal');
-    final result = await showDialog<num>(
+  /// Categories that don't have a reward rule yet (e.g. just added in Manage Categories).
+  List<Map<String, dynamic>> get _categoriesWithoutRule {
+    final ruledIds = _rules.map((r) => r['categoryId']).toSet();
+    return _categories.where((c) => !ruledIds.contains(c['id'])).toList();
+  }
+
+  Future<void> _editRule(Map<String, dynamic> rule) async {
+    final ctrl = TextEditingController(text: '${rule['pointsPerKg'] ?? 0}');
+    final formKey = GlobalKey<FormState>();
+
+    final result = await showDialog<double>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Update Rule: $key'),
-        content: TextFormField(
-          controller: ctrl,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(labelText: 'Points per KG'),
+        title: Text('Edit: ${rule['categoryName']}'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: ctrl,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(labelText: 'Points per KG', suffixText: 'pts/kg'),
+            validator: (v) {
+              final n = double.tryParse(v ?? '');
+              if (n == null || n < 0) return 'Enter a valid, non-negative number';
+              return null;
+            },
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () {
-              final n = num.tryParse(ctrl.text);
-              if (n != null) Navigator.pop(ctx, n);
+              if (!formKey.currentState!.validate()) return;
+              Navigator.pop(ctx, double.parse(ctrl.text));
             },
             child: const Text('Save'),
           ),
@@ -56,15 +76,97 @@ class _RewardRulesScreenState extends State<RewardRulesScreen> {
       ),
     );
 
-    if (result != null && mounted) {
-      final updatedRules = Map<String, dynamic>.from(_rules ?? {});
-      updatedRules[key] = result;
-      try {
-        await ApiClient.post('/admin/reward-rules', {'rules': updatedRules});
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Reward rule updated!'), backgroundColor: AppTheme.success));
+    if (result == null || !mounted) return;
+    try {
+      await ApiClient.patch('/admin/reward-rules/${rule['id']}', {'pointsPerKg': result});
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${rule['categoryName']} is now $result pts/kg'), backgroundColor: AppTheme.success),
+        );
         _load();
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: AppTheme.error));
+      }
+    } catch (e) {
+      if (mounted) {
+        final msg = e is ApiException ? e.message : 'Could not reach the server.';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: AppTheme.error));
+      }
+    }
+  }
+
+  Future<void> _addRule() async {
+    final available = _categoriesWithoutRule;
+    if (available.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Every waste category already has a reward rule.')),
+      );
+      return;
+    }
+
+    Map<String, dynamic>? selectedCategory = available.first;
+    final ctrl = TextEditingController(text: '15');
+    final formKey = GlobalKey<FormState>();
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Add Reward Rule'),
+          content: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<Map<String, dynamic>>(
+                  initialValue: selectedCategory,
+                  decoration: const InputDecoration(labelText: 'Waste Category'),
+                  items: available.map((c) => DropdownMenuItem(value: c, child: Text(c['name'] ?? 'Category'))).toList(),
+                  onChanged: (v) => setDialogState(() => selectedCategory = v),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: ctrl,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: 'Points per KG', suffixText: 'pts/kg'),
+                  validator: (v) {
+                    final n = double.tryParse(v ?? '');
+                    if (n == null || n < 0) return 'Enter a valid, non-negative number';
+                    return null;
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                if (!formKey.currentState!.validate() || selectedCategory == null) return;
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('Add Rule'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != true || !mounted || selectedCategory == null) return;
+    try {
+      await ApiClient.post('/admin/reward-rules', {
+        'categoryId': selectedCategory!['id'],
+        'categoryName': selectedCategory!['name'],
+        'pointsPerKg': double.parse(ctrl.text),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Reward rule added!'), backgroundColor: AppTheme.success),
+        );
+        _load();
+      }
+    } catch (e) {
+      if (mounted) {
+        final msg = e is ApiException ? e.message : 'Could not reach the server.';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: AppTheme.error));
       }
     }
   }
@@ -72,7 +174,10 @@ class _RewardRulesScreenState extends State<RewardRulesScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Reward Rules Configuration')),
+      appBar: AppBar(
+        title: const Text('Reward Rules Configuration'),
+        actions: [IconButton(onPressed: _load, icon: const Icon(Icons.refresh), tooltip: 'Refresh')],
+      ),
       body: _loading ? const LoadingWidget()
         : _error != null ? ErrorStateWidget(message: _error!, onRetry: _load)
         : Column(
@@ -91,28 +196,38 @@ class _RewardRulesScreenState extends State<RewardRulesScreen> {
                 ),
               ),
               Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: (_rules ?? {}).entries.map((entry) {
-                    return Card(
-                      child: ListTile(
-                        leading: const CircleAvatar(
-                          backgroundColor: Color(0xFFFFF8E1),
-                          child: Icon(Icons.stars, color: Color(0xFFF57F17)),
-                        ),
-                        title: Text(entry.key, style: const TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: Text('${entry.value} points per kg'),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.edit, color: AppTheme.primary),
-                          onPressed: () => _showEditRuleDialog(entry.key, entry.value as num),
-                        ),
+                child: _rules.isEmpty
+                  ? const EmptyStateWidget(icon: Icons.stars_outlined, title: 'No reward rules yet', subtitle: 'Add one for each waste category.')
+                  : RefreshIndicator(
+                      onRefresh: _load,
+                      child: ListView(
+                        padding: const EdgeInsets.all(12),
+                        children: _rules.map((rule) {
+                          return Card(
+                            child: ListTile(
+                              leading: const CircleAvatar(
+                                backgroundColor: Color(0xFFFFF8E1),
+                                child: Icon(Icons.stars, color: Color(0xFFF57F17)),
+                              ),
+                              title: Text(rule['categoryName'] ?? 'Category', style: const TextStyle(fontWeight: FontWeight.bold)),
+                              subtitle: Text('${rule['pointsPerKg'] ?? 0} points per kg'),
+                              trailing: IconButton(
+                                icon: const Icon(Icons.edit, color: AppTheme.primary),
+                                onPressed: () => _editRule(rule),
+                              ),
+                            ),
+                          );
+                        }).toList(),
                       ),
-                    );
-                  }).toList(),
-                ),
+                    ),
               ),
             ],
           ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _addRule,
+        icon: const Icon(Icons.add),
+        label: const Text('Add Rule'),
+      ),
     );
   }
 }

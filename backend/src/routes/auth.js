@@ -1,9 +1,8 @@
 const { body, validationResult } = require('express-validator');
 const express = require('express');
 const { getDb, admin } = require('../config/firebase');
-const { v4: uuidv4 } = require('uuid');
 const { authenticate } = require('../middleware/auth');
-const { hashPassword, verifyPassword, createSessionToken, publicUser } = require('../services/authService');
+const { verifyPassword, createSessionToken, publicUser, createUserAccount } = require('../services/authService');
 
 const router = express.Router();
 
@@ -31,35 +30,15 @@ router.post(
     const { displayName, email, phone, password } = req.body;
 
     try {
-      const db = getDb();
-      const existing = await db.collection('users').where('email', '==', email).limit(1).get();
-      if (!existing.empty) {
-        return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });
-      }
-
-      const uid = `user_${uuidv4()}`;
-      const now = new Date().toISOString();
-      const userData = {
-        uid,
-        displayName,
-        email,
-        phone,
-        role: 'citizen',          // Self-registration is always citizen
-        rewardBalance: 0,
-        active: true,
-        fcmToken: null,
-        passwordHash: hashPassword(password),
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      await db.collection('users').doc(uid).set(userData);
+      // Self-registration is always citizen — role can't be set by the client.
+      const userData = await createUserAccount({ displayName, email, phone, password, role: 'citizen' });
       res.status(201).json({
         message: 'Account created',
-        token: createSessionToken(uid),
+        token: createSessionToken(userData.uid),
         user: publicUser(userData),
       });
     } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
       console.error('[Auth] Register error:', err.message);
       res.status(500).json({ error: 'Registration failed' });
     }
