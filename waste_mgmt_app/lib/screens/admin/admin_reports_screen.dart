@@ -60,6 +60,154 @@ class _AdminReportsScreenState extends State<AdminReportsScreen> {
     return str.length >= 10 ? str.substring(0, 10) : str;
   }
 
+  Future<void> _addRecord() async {
+    List<Map<String, dynamic>> citizens;
+    List<Map<String, dynamic>> categories;
+    try {
+      final usersData = await ApiClient.get('/admin/users');
+      citizens = List<Map<String, dynamic>>.from(usersData['users'] ?? [])
+          .where((u) => u['role'] == 'citizen').toList();
+      final catData = await ApiClient.get('/admin/categories');
+      categories = List<Map<String, dynamic>>.from(catData['categories'] ?? []);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not load citizens/categories.'), backgroundColor: AppTheme.error),
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+
+    if (citizens.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No citizen accounts exist yet — add one in Manage Users first.')),
+      );
+      return;
+    }
+    if (categories.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No waste categories exist yet — add one in Manage Categories first.')),
+      );
+      return;
+    }
+
+    Map<String, dynamic>? selectedCitizen = citizens.first;
+    Map<String, dynamic>? selectedCategory = categories.first;
+    DateTime selectedDate = DateTime.now();
+    final qtyCtrl = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Add Recycling Record'),
+          content: SingleChildScrollView(
+            child: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButtonFormField<Map<String, dynamic>>(
+                    initialValue: selectedCitizen,
+                    decoration: const InputDecoration(labelText: 'Citizen'),
+                    isExpanded: true,
+                    items: citizens.map((c) {
+                      return DropdownMenuItem(
+                        value: c,
+                        child: Text(c['displayName'] ?? c['email'] ?? 'Citizen', overflow: TextOverflow.ellipsis),
+                      );
+                    }).toList(),
+                    onChanged: (v) => setDialogState(() => selectedCitizen = v),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<Map<String, dynamic>>(
+                    initialValue: selectedCategory,
+                    decoration: const InputDecoration(labelText: 'Waste Category'),
+                    isExpanded: true,
+                    items: categories.map((c) {
+                      return DropdownMenuItem(value: c, child: Text(c['name'] ?? 'Category'));
+                    }).toList(),
+                    onChanged: (v) => setDialogState(() => selectedCategory = v),
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: qtyCtrl,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'Weight (kg)', suffixText: 'kg'),
+                    validator: (v) {
+                      final n = double.tryParse(v ?? '');
+                      if (n == null || n <= 0) return 'Enter a weight greater than 0';
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Date Recycled'),
+                    subtitle: Text(_formatDate(selectedDate.toIso8601String())),
+                    trailing: const Icon(Icons.calendar_today, size: 18),
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: ctx,
+                        initialDate: selectedDate,
+                        firstDate: DateTime(2024),
+                        lastDate: DateTime.now(),
+                      );
+                      if (picked != null) setDialogState(() => selectedDate = picked);
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Reward points are calculated automatically from this category\'s rate and credited to the citizen immediately.',
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                if (!formKey.currentState!.validate() || selectedCitizen == null || selectedCategory == null) return;
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('Add Record'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != true || !mounted || selectedCitizen == null || selectedCategory == null) return;
+
+    try {
+      final res = await ApiClient.post('/recycling-records', {
+        'citizenUid': selectedCitizen!['uid'] ?? selectedCitizen!['id'],
+        'categoryId': selectedCategory!['id'],
+        'categoryName': selectedCategory!['name'],
+        'quantityKg': double.parse(qtyCtrl.text),
+        'verifiedAt': selectedDate.toIso8601String(),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Added! ${selectedCitizen!['displayName']} earned +${res['points']} pts.'), backgroundColor: AppTheme.success),
+        );
+        _load();
+      }
+    } catch (e) {
+      if (mounted) {
+        final msg = e is ApiException ? e.message : 'Could not reach the server.';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: AppTheme.error));
+      }
+    }
+  }
+
   Future<void> _deleteRecord(Map<String, dynamic> record) async {
     final confirm = await showConfirmDialog(
       context,
@@ -172,13 +320,30 @@ class _AdminReportsScreenState extends State<AdminReportsScreen> {
                         itemCount: visible.length,
                         itemBuilder: (_, i) {
                           final r = visible[i];
+                          final isManual = r['source'] == 'manual';
                           return Card(
                             child: ListTile(
-                              leading: const CircleAvatar(
-                                backgroundColor: Color(0xFFE8F5E9),
-                                child: Icon(Icons.verified, color: AppTheme.success),
+                              leading: CircleAvatar(
+                                backgroundColor: isManual ? const Color(0xFFE3F2FD) : const Color(0xFFE8F5E9),
+                                child: Icon(isManual ? Icons.edit_note : Icons.verified, color: isManual ? Colors.blue : AppTheme.success),
                               ),
-                              title: Text('${r['categoryName'] ?? "Waste"} — ${r['quantityKg']} kg', style: const TextStyle(fontWeight: FontWeight.bold)),
+                              title: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text('${r['categoryName'] ?? "Waste"} — ${r['quantityKg']} kg', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                  ),
+                                  if (isManual)
+                                    const Padding(
+                                      padding: EdgeInsets.only(left: 6),
+                                      child: Chip(
+                                        label: Text('Manual', style: TextStyle(fontSize: 10)),
+                                        backgroundColor: Color(0xFFE3F2FD),
+                                        visualDensity: VisualDensity.compact,
+                                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                      ),
+                                    ),
+                                ],
+                              ),
                               subtitle: Text(
                                 'Citizen: ${r['citizenName'] ?? "Citizen"}\nCollector: ${r['collectorName'] ?? "Collector"} • ${_formatDate(r['verifiedAt'])}',
                               ),
@@ -205,6 +370,11 @@ class _AdminReportsScreenState extends State<AdminReportsScreen> {
               ),
             ],
           ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _addRecord,
+        icon: const Icon(Icons.add),
+        label: const Text('Add Record'),
+      ),
     );
   }
 }

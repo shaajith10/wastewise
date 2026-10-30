@@ -1,7 +1,11 @@
 const express = require('express');
+const { body, validationResult } = require('express-validator');
+const { v4: uuidv4 } = require('uuid');
 const { getDb } = require('../config/firebase');
 const { authenticate } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
+const { awardRewardPoints } = require('../services/rewardService');
+const { sendNotification } = require('../services/notificationService');
 
 const router = express.Router();
 router.use(authenticate);
@@ -39,6 +43,79 @@ router.get('/', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch recycling records' });
   }
 });
+
+/**
+ * POST /api/recycling-records
+ * Admin-only: manually logs a recycling event for a citizen — same path a real
+ * QR verification takes (reward points calculated from the category's rate and
+ * credited to the citizen's wallet), for backfilling history or demo data
+ * without needing a real pickup request and collector scan.
+ * Body: { citizenUid, categoryId, categoryName, quantityKg, verifiedAt? }
+ */
+router.post(
+  '/',
+  requireRole('admin'),
+  [
+    body('citizenUid').trim().notEmpty().withMessage('Select a citizen'),
+    body('categoryId').trim().notEmpty().withMessage('Select a waste category'),
+    body('categoryName').trim().notEmpty(),
+    body('quantityKg').isFloat({ gt: 0 }).withMessage('Weight must be greater than 0'),
+    body('verifiedAt').optional({ checkFalsy: true }).isISO8601().withMessage('Invalid date'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(422).json({ error: errors.array()[0].msg, errors: errors.array() });
+
+    const { citizenUid, categoryId, categoryName, quantityKg, verifiedAt } = req.body;
+
+    try {
+      const db = getDb();
+      const citizenDoc = await db.collection('users').doc(citizenUid).get();
+      if (!citizenDoc.exists) return res.status(404).json({ error: 'Citizen not found' });
+      const citizenData = citizenDoc.data();
+      if (citizenData.role !== 'citizen') {
+        return res.status(400).json({ error: `${citizenData.displayName || 'That user'} is not a citizen account.` });
+      }
+
+      // A synthetic, always-unique requestId — reuses the same idempotent,
+      // rate-looked-up crediting logic the real QR flow uses, just not tied
+      // to a real pickup request.
+      const requestId = `manual_${uuidv4()}`;
+      const { points, newBalance } = await awardRewardPoints({
+        citizenUid, requestId, categoryId, quantityKg, actualWeightKg: quantityKg,
+      });
+
+      const recordRef = await db.collection('recyclingRecords').add({
+        requestId,
+        citizenUid,
+        citizenName: citizenData.displayName || 'Citizen',
+        collectorUid: null,
+        collectorName: `Added by ${req.user.displayName || 'Admin'}`,
+        categoryId,
+        categoryName,
+        quantityKg: parseFloat(quantityKg),
+        points,
+        verifiedAt: verifiedAt || new Date().toISOString(),
+        source: 'manual',
+        addedByUid: req.user.uid,
+      });
+
+      sendNotification({
+        toUid: citizenUid,
+        title: '🎉 Recycling Added to Your History',
+        body: `An admin logged ${quantityKg} kg of ${categoryName} for you. You earned ${points} reward points!`,
+        type: 'verified',
+        data: { requestId, points: String(points) },
+        fcmToken: citizenData.fcmToken,
+      }).catch(() => {});
+
+      res.status(201).json({ message: 'Recycling record added', id: recordRef.id, points, newBalance });
+    } catch (err) {
+      console.error('[RecyclingRecords] Manual add error:', err.message);
+      res.status(500).json({ error: 'Failed to add recycling record' });
+    }
+  }
+);
 
 /**
  * DELETE /api/recycling-records/:id
