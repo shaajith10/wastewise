@@ -1,0 +1,29 @@
+# Secrets
+backend/.env
+backend/serviceAccountKey.json
+
+# Node
+backend/node_modules/
+npm-debug.log*
+
+# Backend local data (demo database, grows over time)
+backend/data/database.json
+
+# Flutter / Dart
+waste_mgmt_app/.dart_tool/
+waste_mgmt_app/.flutter-plugins
+waste_mgmt_app/.flutter-plugins-dependencies
+waste_mgmt_app/.idea/
+
+# Flutter build output - EXCEPT build/web, which is the pre-built site the
+# backend serves in production. We commit that so the free host can run the
+# app directly with Node only, no Flutter SDK needed on the server.
+waste_mgmt_app/build/*
+!waste_mgmt_app/build/web/
+
+# Downloaded tools (large binaries, re-downloadable)
+tools/cloudflared.exe
+
+# Editor
+.vscode/*
+!.vscode/settings.json
